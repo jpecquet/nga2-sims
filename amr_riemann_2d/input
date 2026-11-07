@@ -1,0 +1,22 @@
+# AMR grid
+Base nx: 200
+Base ny: 200
+Base nz: 1
+Max levels: 2
+
+# Regridding parameters
+Regrid nsteps:     1
+Tagging Criterion: 0.05
+
+# Gamma and EOS
+Gamma: 1.4
+
+# Initial condition (also sets max time)
+Configuration: 17
+
+# Time integration
+Max dt:   1.0e-3
+Max CFL:  0.475
+
+# Output
+Output period: 1.0e-3

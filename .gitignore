@@ -1,0 +1,25 @@
+# Allowlist: track only what is needed to build and run each case.
+# Everything else (build/, executables, monitor/, amrviz/, ensight/,
+# plots/, scripts/, restarts, images, movies...) is ignored.
+
+# Ignore everything...
+/*
+/*/*
+
+# ...except the repo config
+!/.gitignore
+
+# ...and, in each case directory, the essentials
+!/*/
+!/*/GNUmakefile
+!/*/input
+!/*/README
+!/*/README.md
+!/*/src/
+
+# Never track backups/patch leftovers or OS junk, even inside src/
+*.orig
+*.bak
+*.rej
+*~
+.DS_Store

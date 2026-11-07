@@ -1,0 +1,19 @@
+# AMR grid
+Base nx: 480
+Base ny: 120
+Max levels: 2
+
+# Regridding parameters
+Regrid nsteps:     2
+Tagging Criterion: 0.05
+
+# Flow properties
+Mach number: 10.0
+Shock angle: 60.0
+
+# Time integration
+Max dt:   1.0e-3
+Max CFL:  0.475
+
+# Output
+Output period: 1.0e-3
