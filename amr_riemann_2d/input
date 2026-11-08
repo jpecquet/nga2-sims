@@ -1,7 +1,6 @@
 # AMR grid
 Base nx: 200
 Base ny: 200
-Base nz: 1
 Max levels: 2
 
 # Regridding parameters

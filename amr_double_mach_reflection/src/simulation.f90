@@ -1,4 +1,4 @@
-!> Double Mach reflection simulation (Woodward and Colella, 1984) with AMR code
+!> Simulation of DOUBLE MACH REFLECTION (Woodward & Colella, 1984) with AMR
 module simulation
    use precision,           only: WP
    use amrgrid_class,       only: amrgrid
@@ -37,45 +37,60 @@ module simulation
    type(ideal_gas), target :: fluid
 
    !> Flow parameters
-   real(WP) :: M1,P1,rho1,U1,V1
-   real(WP) :: M2,P2,rho2,U2,V2
-   real(WP) :: x0_shock,theta_shock,Wshock,Ushock
+   real(WP) :: Ms                               !< Shock Mach number
+   real(WP) :: rho_pre ,P_pre ,U_pre ,V_pre     !< Pre-shock state
+   real(WP) :: rho_post,P_post,U_post,V_post    !< Post-shock state
+   real(WP) :: x0_shock                         !< Shock x-intercept with y=0 at t=0
+   real(WP) :: theta_shock                      !< Shock angle with respect to the x-axis (rad)
+   real(WP) :: Ushock_x                         !< Speed of the shock x-intercept along any line y=const
 
 contains
 
-   !> Heaviside function for shock
-   real(WP) function Hshock(x,y,theta,x0,delta)
-      real(WP), intent(in) :: x,y,theta,x0,delta
-      real(WP) :: n ! shock-normal coordinate
-      n = -(x-x0)*sin(theta) + y*cos(theta) ! x0 is x-intercept of shock (y=0)
+   !> Heaviside function for shock: 0 pre-shock, 1 post-shock
+   real(WP) function shock_heaviside(x,y,theta,x0)
+      real(WP), intent(in) :: x,y,theta,x0
+      real(WP) :: n
+      ! Shock-normal coordinate, x0 is the x-intercept of the shock at y=0
+      n=-(x-x0)*sin(theta)+y*cos(theta)
       if (n.lt.0.0_WP) then
-          Hshock=0.0_WP ! pre-shock
+         shock_heaviside=0.0_WP
       else
-          Hshock=1.0_WP ! post-shock
+         shock_heaviside=1.0_WP
       end if
-   end function Hshock
+   end function shock_heaviside
 
-   !> Set viscosities to zero
+   !> Set physical viscosities to zero (inviscid)
    subroutine get_viscosities()
       implicit none
       call fs%visc%setval(val=0.0_WP)
       call fs%beta%setval(val=0.0_WP)
       call fs%diff%setval(val=0.0_WP)
    end subroutine get_viscosities
-    
-   !> User init callback - set initial Q
-   subroutine user_init(solver,lvl,time,ba,dm)
+
+   !> Update viscosities and derived output fields from current primitive variables
+   subroutine update_derived()
+      implicit none
+      ! Compute viscosities and add artificial bulk viscosity
+      call get_viscosities()
+      call fs%add_viscartif(dt=time%dt)
+      ! Compute Umag and Mach number
+      call Umag%get_magnitude(srcX=fs%UVW,srcY=fs%UVW,srcZ=fs%UVW,compX=1,compY=2,compZ=3)
+      call Mach%copy(src=Umag); call Mach%divide(src=fs%C)
+   end subroutine update_derived
+
+   !> Solver init callback - set initial Q
+   subroutine fs_init(solver,lvl,t,ba,dm)
       use amrex_amr_module, only: amrex_boxarray,amrex_distromap,amrex_mfiter,amrex_box
       use amrex_amr_module, only: amrex_mfiter_build,amrex_mfiter_destroy
       class(amrcomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      real(WP), intent(in) :: time
+      real(WP), intent(in) :: t
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
       real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
-      real(WP) :: dx,dy,x,y,P,rho,U,V,IE
+      real(WP) :: dx,dy,x,y,H,rho,U,V,P,IE
       integer :: i,j,k
       ! Get mesh size
       dx=solver%amr%dx(lvl); dy=solver%amr%dy(lvl)
@@ -83,7 +98,7 @@ contains
       call amrex_mfiter_build(mfi,ba,dm,tiling=.true.)
       do while (mfi%next())
          ! Get pointer to Q
-         pQ =>solver%Q%mf(lvl)%dataptr(mfi)
+         pQ=>solver%Q%mf(lvl)%dataptr(mfi)
          ! Get tilebox with overlap
          bx=mfi%growntilebox(solver%nover)
          do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
@@ -91,11 +106,12 @@ contains
             x=solver%amr%xlo+(real(i,WP)+0.5_WP)*dx
             y=solver%amr%ylo+(real(j,WP)+0.5_WP)*dy
             ! Set initial conditions
-            U=U1+(U2-U1)*Hshock(x,y,theta_shock,x0_shock,dx)
-            V=V1+(V2-V1)*Hshock(x,y,theta_shock,x0_shock,dx)
-            P=P1+(P2-P1)*Hshock(x,y,theta_shock,x0_shock,dx)
-            rho=rho1+(rho2-rho1)*Hshock(x,y,theta_shock,x0_shock,dx)
-            IE=fluid%get_e_from_p_rho(p=P,rho=rho,y=[1.0_WP])
+            H=shock_heaviside(x,y,theta_shock,x0_shock)
+            rho=rho_pre+(rho_post-rho_pre)*H
+            U  =U_pre  +(U_post  -U_pre  )*H
+            V  =V_pre  +(V_post  -V_pre  )*H
+            P  =P_pre  +(P_post  -P_pre  )*H
+            IE =fluid%get_e_from_p_rho(p=P,rho=rho,y=[1.0_WP])
             ! Set conserved variable Q
             pQ(i,j,k,1)=rho
             pQ(i,j,k,2)=rho*U
@@ -105,147 +121,148 @@ contains
          end do; end do; end do
       end do
       call amrex_mfiter_destroy(mfi)
-   end subroutine user_init
+   end subroutine fs_init
 
-   !> Apply Dirichlet BCs for the inflow, moving-shock top boundary,
-   !> and half-inflow, half-reflective wall bottom boundary
-   subroutine dirichlet(solver,lvl,time,face,bx,comp,p)
+   !> Solver BC callback - post-shock inflow at x-low, half-inflow/half-reflective wall
+   !> at y-low, and time-dependent moving-shock inflow at y-high
+   subroutine fs_bc(solver,lvl,t,face,bx,comp,pBC)
       use amrex_amr_module, only: amrex_box
       class(amrcomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      real(WP), intent(in) :: time
+      real(WP), intent(in) :: t
       integer, intent(in) :: face
       type(amrex_box), intent(in) :: bx
       character(len=1), intent(in) :: comp
-      real(WP), dimension(:,:,:,:), contiguous, pointer :: p
-      real(WP) :: dx,dy,x,y,pres,rho,U,V,IE,Hshock_t
+      real(WP), dimension(:,:,:,:), contiguous, pointer :: pBC
+      real(WP) :: dx,dy,x,y,H,rho,U,V,P,IE
       integer :: i,j,k
       ! Get mesh size
       dx=solver%amr%dx(lvl); dy=solver%amr%dy(lvl)
       select case (face)
-       case (1)  ! Xlo, post-shock conditions inflow
+       case (1) ! x-low: post-shock inflow
          select case (comp)
           case ('U')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=U2
+               pBC(i,j,k,1)=U_post
             end do; end do; end do
           case ('V')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=V2
+               pBC(i,j,k,1)=V_post
             end do; end do; end do
           case ('W')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=0.0_WP
+               pBC(i,j,k,1)=0.0_WP
             end do; end do; end do
           case ('Q')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=rho2
-               p(i,j,k,2)=rho2*U2
-               p(i,j,k,3)=rho2*V2
-               p(i,j,k,4)=0.0_WP
-               p(i,j,k,5)=rho2*fluid%get_e_from_p_rho(p=P2,rho=rho2,y=[1.0_WP])
+               pBC(i,j,k,1)=rho_post
+               pBC(i,j,k,2)=rho_post*U_post
+               pBC(i,j,k,3)=rho_post*V_post
+               pBC(i,j,k,4)=0.0_WP
+               pBC(i,j,k,5)=rho_post*fluid%get_e_from_p_rho(p=P_post,rho=rho_post,y=[1.0_WP])
             end do; end do; end do
          end select
-     case (3) ! Ylo, post-shock conditions inflow for x<1/6, reflective wall for x>1/6
+       case (3) ! y-low: post-shock inflow for x<x0_shock, reflective wall for x>x0_shock
          select case (comp)
           case ('U')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+real(i,WP)*dx
-               if (x.lt.x0_shock) then ! post-shock conditions
-                 p(i,j,k,1)=U2
-               else ! reflective wall
-                 p(i,j,k,1)=p(i,-j-1,k,1)
+               if (x.lt.x0_shock) then
+                  pBC(i,j,k,1)=U_post
+               else
+                  pBC(i,j,k,1)=pBC(i,-j-1,k,1)
                end if
             end do; end do; end do
           case ('V')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+(real(i,WP)+0.5_WP)*dx
-               if (x.lt.x0_shock) then ! post-shock conditions
-                 p(i,j,k,1)=V2
-               else ! reflective wall 
-                 p(i,0,k,1)=0
-                 p(i,j,k,1)=-p(i,-j,k,1)
+               if (x.lt.x0_shock) then
+                  pBC(i,j,k,1)=V_post
+               else
+                  if (j.eq.0) then
+                     pBC(i,j,k,1)=0.0_WP
+                  else
+                     pBC(i,j,k,1)=-pBC(i,-j,k,1)
+                  end if
                end if
             end do; end do; end do
           case ('W')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=0.0_WP
+               pBC(i,j,k,1)=0.0_WP
             end do; end do; end do
           case ('Q')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+(real(i,WP)+0.5_WP)*dx
-               if (x.lt.x0_shock) then ! post-shock conditions
-                 p(i,j,k,1)=rho2
-                 p(i,j,k,2)=rho2*U2
-                 p(i,j,k,3)=rho2*V2
-                 p(i,j,k,4)=0.0_WP
-                 p(i,j,k,5)=rho2*fluid%get_e_from_p_rho(p=P2,rho=rho2,y=[1.0_WP])
-               else ! reflective wall
-                 p(i,j,k,1)=p(i,-j-1,k,1)
-                 p(i,j,k,2)=p(i,-j-1,k,2)
-                 p(i,j,k,3)=-p(i,-j-1,k,3)
-                 p(i,j,k,4)=0.0_WP
-                 p(i,j,k,5)=p(i,-j-1,k,5)
+               if (x.lt.x0_shock) then
+                  pBC(i,j,k,1)=rho_post
+                  pBC(i,j,k,2)=rho_post*U_post
+                  pBC(i,j,k,3)=rho_post*V_post
+                  pBC(i,j,k,4)=0.0_WP
+                  pBC(i,j,k,5)=rho_post*fluid%get_e_from_p_rho(p=P_post,rho=rho_post,y=[1.0_WP])
+               else
+                  pBC(i,j,k,1)= pBC(i,-j-1,k,1)
+                  pBC(i,j,k,2)= pBC(i,-j-1,k,2)
+                  pBC(i,j,k,3)=-pBC(i,-j-1,k,3)
+                  pBC(i,j,k,4)= 0.0_WP
+                  pBC(i,j,k,5)= pBC(i,-j-1,k,5)
                end if
             end do; end do; end do
          end select
-     case (4) ! Yhi, time-dependent inflow condition (post- and pre-shock)
+       case (4) ! y-high: time-dependent inflow following the moving shock
          select case (comp)
           case ('U')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+real(i,WP)*dx
                y=solver%amr%ylo+(real(j,WP)+0.5_WP)*dy
-               Hshock_t=Hshock(x,y,theta_shock,x0_shock+Ushock*time,dx)
-               U=U1+(U2-U1)*Hshock_t
-               p(i,j,k,1)=U
+               H=shock_heaviside(x,y,theta_shock,x0_shock+Ushock_x*t)
+               pBC(i,j,k,1)=U_pre+(U_post-U_pre)*H
             end do; end do; end do
           case ('V')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+(real(i,WP)+0.5_WP)*dx
                y=solver%amr%ylo+real(j,WP)*dy
-               Hshock_t=Hshock(x,y,theta_shock,x0_shock+Ushock*time,dx)
-               V=V1+(V2-V1)*Hshock_t
-               p(i,j,k,1)=V
+               H=shock_heaviside(x,y,theta_shock,x0_shock+Ushock_x*t)
+               pBC(i,j,k,1)=V_pre+(V_post-V_pre)*H
             end do; end do; end do
           case ('W')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               p(i,j,k,1)=0.0_WP
+               pBC(i,j,k,1)=0.0_WP
             end do; end do; end do
           case ('Q')
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                x=solver%amr%xlo+(real(i,WP)+0.5_WP)*dx
                y=solver%amr%ylo+(real(j,WP)+0.5_WP)*dy
-               Hshock_t=Hshock(x,y,theta_shock,x0_shock+Ushock*time,dx)
-               pres=P1+(P2-P1)*Hshock_t
-               U=U1+(U2-U1)*Hshock_t
-               V=V1+(V2-V1)*Hshock_t
-               rho=rho1+(rho2-rho1)*Hshock_t
-               IE=fluid%get_e_from_p_rho(p=pres,rho=rho,y=[1.0_WP])
-               p(i,j,k,1)=rho
-               p(i,j,k,2)=rho*U
-               p(i,j,k,3)=rho*V
-               p(i,j,k,4)=0.0_WP
-               p(i,j,k,5)=rho*IE
+               H=shock_heaviside(x,y,theta_shock,x0_shock+Ushock_x*t)
+               rho=rho_pre+(rho_post-rho_pre)*H
+               U  =U_pre  +(U_post  -U_pre  )*H
+               V  =V_pre  +(V_post  -V_pre  )*H
+               P  =P_pre  +(P_post  -P_pre  )*H
+               IE =fluid%get_e_from_p_rho(p=P,rho=rho,y=[1.0_WP])
+               pBC(i,j,k,1)=rho
+               pBC(i,j,k,2)=rho*U
+               pBC(i,j,k,3)=rho*V
+               pBC(i,j,k,4)=0.0_WP
+               pBC(i,j,k,5)=rho*IE
             end do; end do; end do
          end select
       end select
-   end subroutine dirichlet
+   end subroutine fs_bc
 
-   !> Tagger based on density discontinuities
-   subroutine my_tagger(solver,lvl,time,tags_ptr)
+   !> Solver tagging callback - tag cells with large normalized density gradient
+   subroutine fs_tag(solver,lvl,t,tags_ptr)
       use iso_c_binding,    only: c_ptr,c_char
       use amrex_amr_module, only: amrex_mfiter,amrex_box,amrex_tagboxarray
       use amrgrid_class,    only: SETtag
       class(amrcomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      real(WP), intent(in) :: time
+      real(WP), intent(in) :: t
       type(c_ptr), intent(in) :: tags_ptr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
       character(kind=c_char), dimension(:,:,:,:), contiguous, pointer :: tagarr
       real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
-      real(WP) :: rho, drho_ind_x, drho_ind_y, drho_ind
+      real(WP) :: drho_ind_x,drho_ind_y,drho_ind
       integer :: i,j,k
       tags=tags_ptr
       call solver%amr%mfiter_build(lvl,mfi)
@@ -254,8 +271,6 @@ contains
          tagarr=>tags%dataPtr(mfi)
          pQ=>solver%Q%mf(lvl)%dataptr(mfi)
          do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-            ! Local density
-            rho=pQ(i,j,k,1)
             ! Centered density jumps
             drho_ind_x=0.5_WP*(pQ(i+1,j,k,1)-pQ(i-1,j,k,1))/max(pQ(i,j,k,1),solver%rho_floor)
             drho_ind_y=0.5_WP*(pQ(i,j+1,k,1)-pQ(i,j-1,k,1))/max(pQ(i,j,k,1),solver%rho_floor)
@@ -265,41 +280,44 @@ contains
          end do; end do; end do
       end do
       call solver%amr%mfiter_destroy(mfi)
-   end subroutine my_tagger
+   end subroutine fs_tag
 
    !> Initialization of problem solver
    subroutine simulation_init
       use param, only: param_read
       implicit none
 
-      ! Read EoS and flow parameters
-      init_eos_and_flow: block
-         real(WP) :: Cv,Gamma,Un2
-         call param_read('Mach number',M1)
+      ! Initialize EoS and flow parameters
+      init_flow: block
+         real(WP) :: Gamma,Cv,Wshock,Mn_post,Un_post
+         ! Read parameters
+         call param_read('Shock Mach number',Ms)
          call param_read('Shock angle',theta_shock)
          theta_shock=4.0_WP*atan(1.0_WP)/180.0_WP*theta_shock ! deg to rad
          x0_shock=1.0_WP/6.0_WP
-         Gamma=1.4_WP
-         Cv=1.0_WP/(Gamma-1.0_WP) ! such that gas constant R = 1, i.e. T = p/rho
+         ! Create fluid
+         call param_read('Gamma',Gamma,default=1.4_WP)
+         Cv=1.0_WP/(Gamma-1.0_WP) ! such that gas constant R=1, i.e., T=P/rho
          call fluid%initialize(gamma=Gamma,cv=Cv,q=0.0_WP,qp=0.0_WP,name='fluid')
-         ! Pre-shock conditions
-         U1=0.0_WP; V1=0.0_WP
-         rho1=1.4_WP; P1=1.0_WP ! such that rho/P=1.4, c=1
-         Wshock=M1*fluid%get_c_from_p_rho(p=P1,rho=rho1,y=[1.0_WP])
-         Ushock=Wshock/sin(theta_shock)
-         ! Post-shock conditions from Rankine-Hugoniot
-         rho2=rho1*(Gamma+1)*M1**2/(2+(Gamma-1)*M1**2)
-         P2=P1*(2*Gamma*M1**2-(Gamma-1))/(Gamma+1)
-         M2=sqrt(((Gamma-1)*M1**2+2)/(2*Gamma*M1**2-(Gamma-1)))
-         ! Post-shock normal velocity relative to fixed frame
-         Un2=Wshock-M2*fluid%get_c_from_p_rho(p=P2,rho=rho2,y=[1.0_WP])
-         U2=Un2*sin(theta_shock)
-         V2=-Un2*cos(theta_shock)
-      end block init_eos_and_flow
+         ! Pre-shock state
+         rho_pre=1.4_WP; P_pre=1.0_WP ! such that c=1 for Gamma=1.4
+         U_pre=0.0_WP; V_pre=0.0_WP
+         ! Shock speed (normal to the shock, and of its x-intercept)
+         Wshock=Ms*fluid%get_c_from_p_rho(p=P_pre,rho=rho_pre,y=[1.0_WP])
+         Ushock_x=Wshock/sin(theta_shock)
+         ! Post-shock state from Rankine-Hugoniot
+         rho_post=rho_pre*(Gamma+1.0_WP)*Ms**2/(2.0_WP+(Gamma-1.0_WP)*Ms**2)
+         P_post=P_pre*(2.0_WP*Gamma*Ms**2-(Gamma-1.0_WP))/(Gamma+1.0_WP)
+         Mn_post=sqrt(((Gamma-1.0_WP)*Ms**2+2.0_WP)/(2.0_WP*Gamma*Ms**2-(Gamma-1.0_WP)))
+         ! Post-shock normal velocity in the lab frame
+         Un_post=Wshock-Mn_post*fluid%get_c_from_p_rho(p=P_post,rho=rho_post,y=[1.0_WP])
+         U_post= Un_post*sin(theta_shock)
+         V_post=-Un_post*cos(theta_shock)
+      end block init_flow
 
       ! Initialize AMR grid
-      create_amrgrid: block
-          amr%name='channel'
+      init_amrgrid: block
+         amr%name='grid'
          call param_read('Base nx',amr%nx)
          call param_read('Base ny',amr%ny)
          call param_read('Max levels',amr%maxlvl)
@@ -312,49 +330,49 @@ contains
          ! Set periodicity
          amr%xper=.false.; amr%yper=.false.; amr%zper=.true.
          call amr%initialize()
-      end block create_amrgrid
+      end block init_amrgrid
 
       ! Initialize time tracker
-      initialize_timetracker: block
+      init_timetracker: block
          time=timetracker(amRoot=amr%amRoot)
          call param_read('Max time',time%tmax,default=0.2_WP)
          call param_read('Max dt',time%dtmax)
          call param_read('Max CFL',time%cflmax)
          call param_read('Subiterations',time%itmax,default=2)
          time%dt=time%dtmax
-      end block initialize_timetracker
+      end block init_timetracker
 
       ! Initialize compressible solver
-      create_solver: block
-         use amrex_amr_module, only: amrex_bc_ext_dir,amrex_bc_foextrap,amrex_bc_reflect_odd
+      init_solver: block
+         use amrex_amr_module, only: amrex_bc_ext_dir,amrex_bc_foextrap
          use amrdata_class,    only: interp_face_lin
          ! Assign material and create flow solver
          fs%mat=>fluid; call fs%initialize(amr=amr)
          ! Use face-linear interp (divfree requires ratio=2 in all dirs)
          if (amr%nz.eq.1) fs%interp_vel=interp_face_lin
          ! Set initial conditions
-         fs%user_init=>user_init
-         ! Set user-defined Dirichlet inflow at X_lo and zero-gradient outflow at X_hi
+         fs%user_init=>fs_init
+         ! Set user-defined Dirichlet inflow at x-low and zero-gradient outflow at x-high
          fs%Q%lo_bc(1,:)=amrex_bc_ext_dir; fs%Q%hi_bc(1,:)=amrex_bc_foextrap
          fs%U%lo_bc(1,1)=amrex_bc_ext_dir; fs%U%hi_bc(1,1)=amrex_bc_foextrap
          fs%V%lo_bc(1,1)=amrex_bc_ext_dir; fs%V%hi_bc(1,1)=amrex_bc_foextrap
          fs%W%lo_bc(1,1)=amrex_bc_ext_dir; fs%W%hi_bc(1,1)=amrex_bc_foextrap
-         ! Set user-defined Dirichlet BCs at Y_lo and Y_hi
+         ! Set user-defined BCs at y-low and y-high
          fs%Q%lo_bc(2,:)=amrex_bc_ext_dir; fs%Q%hi_bc(2,:)=amrex_bc_ext_dir
          fs%U%lo_bc(2,1)=amrex_bc_ext_dir; fs%U%hi_bc(2,1)=amrex_bc_ext_dir
          fs%V%lo_bc(2,1)=amrex_bc_ext_dir; fs%V%hi_bc(2,1)=amrex_bc_ext_dir
          fs%W%lo_bc(2,1)=amrex_bc_ext_dir; fs%W%hi_bc(2,1)=amrex_bc_ext_dir
-         ! Point to user-defined boundary condition
-         fs%user_bc=>dirichlet
-      end block create_solver
+         ! Point to user-defined boundary conditions
+         fs%user_bc=>fs_bc
+      end block init_solver
 
       ! Initialize workspaces
-      create_workspace: block
+      init_workspace: block
          use amrdata_class, only: interp_none
          call dQdt%initialize(amr,name='dQdt',ncomp=5,ng=0,interp=interp_none); call dQdt%register()
          call Umag%initialize(amr,name='Umag',ncomp=1,ng=0,interp=interp_none); call Umag%register()
          call Mach%initialize(amr,name='Mach',ncomp=1,ng=0,interp=interp_none); call Mach%register()
-      end block create_workspace
+      end block init_workspace
 
       ! Initialize regridding
       init_regridding: block
@@ -362,27 +380,28 @@ contains
          regrid_evt=event(time=time,name='Regrid')
          call param_read('Regrid nsteps',regrid_evt%nper)
          ! Set case-specific tagging
-         fs%user_tagging=>my_tagger
+         fs%user_tagging=>fs_tag
          call param_read('Tagging Criterion',drho_tag)
-         ! Create initial grid
+      end block init_regridding
+
+      ! Initialize flow state
+      init_state: block
+         ! Create initial grid and fill Q
          call amr%init_from_scratch(time=time%t)
          ! Initialize primitive variables and face velocity
          call fs%get_primitive(Q=fs%Q); call fs%get_face_velocity()
-         ! Compute viscosities
-         call get_viscosities()
-         ! Add artificial bulk and shear viscosities
-         call fs%add_viscartif(dt=time%dt)
-         call fs%add_vreman(dt=time%dt)
-         ! Compute Umag and Mach number
-         call Umag%get_magnitude(srcX=fs%UVW,srcY=fs%UVW,srcZ=fs%UVW,compX=1,compY=2,compZ=3)
-         call Mach%copy(src=Umag); call Mach%divide(src=fs%C)
-      end block init_regridding
+         ! Update viscosities and derived fields
+         call update_derived()
+      end block init_state
 
       ! Initialize visualization
-      create_viz: block
-         ! Create visualization object
-         call viz%initialize(amr,'DoubleMach',use_hdf5=.false.)
-         call viz%add_scalar(fs%Q,1,'RHO')
+      init_viz: block
+         use string, only: str_medium
+         character(len=str_medium) :: viz_name
+         ! Create visualization object (output in amrviz/<viz_name>/)
+         call param_read('Viz name',viz_name,default='flow')
+         call viz%initialize(amr,trim(viz_name),use_hdf5=.false.)
+         call viz%add_scalar(fs%Q,1,'rho')
          call viz%add_scalar(fs%I,1,'I')
          call viz%add_scalar(fs%P,1,'P')
          call viz%add_scalar(fs%UVW,1,'U')
@@ -397,11 +416,11 @@ contains
          call param_read('Output period',viz_evt%tper)
          ! Write initial state
          if (viz_evt%occurs()) call viz%write(time=time%t)
-      end block create_viz
+      end block init_viz
 
-      ! Create monitors
-      create_monitors: block
-         ! Get solver info and cfl
+      ! Initialize monitors
+      init_monitors: block
+         ! Get solver info and CFL
          call fs%get_info()
          call fs%get_cfl(dt=time%dt,cfl=time%cfl)
          ! Create simulation monitor
@@ -415,8 +434,8 @@ contains
          call mfile%add_column(fs%Wmax,'Wmax')
          call mfile%add_column(fs%Pmin,'Pmin')
          call mfile%add_column(fs%Pmax,'Pmax')
-         call mfile%add_column(fs%Qmin(1),'RHOmin')
-         call mfile%add_column(fs%Qmax(1),'RHOmax')
+         call mfile%add_column(fs%Qmin(1),'rhomin')
+         call mfile%add_column(fs%Qmax(1),'rhomax')
          call mfile%add_column(fs%Imin,'Imin')
          call mfile%add_column(fs%Imax,'Imax')
          call mfile%write()
@@ -433,9 +452,9 @@ contains
          call consfile%write()
          ! Create CFL monitor
          cflfile=monitor(amRoot=amr%amRoot,name='cfl')
-         call cflfile%add_column(time%n,'Timestep')
+         call cflfile%add_column(time%n,'Timestep number')
          call cflfile%add_column(time%t,'Time')
-         call cflfile%add_column(time%dt,'dt')
+         call cflfile%add_column(time%dt,'Timestep size')
          call cflfile%add_column(fs%CFLc_x,'CFLc_x')
          call cflfile%add_column(fs%CFLc_y,'CFLc_y')
          call cflfile%add_column(fs%CFLc_z,'CFLc_z')
@@ -448,7 +467,7 @@ contains
          call cflfile%write()
          ! Create grid monitor
          gridfile=monitor(amRoot=amr%amRoot,name='grid')
-         call gridfile%add_column(time%n,'Timestep')
+         call gridfile%add_column(time%n,'Timestep number')
          call gridfile%add_column(time%t,'Time')
          call gridfile%add_column(amr%nlevels,'Nlvl')
          call gridfile%add_column(amr%nboxes,'Nbox')
@@ -458,29 +477,29 @@ contains
          call gridfile%add_column(amr%minRSS,'Minimum RSS')
          call gridfile%add_column(amr%avgRSS,'Average RSS')
          call gridfile%write()
-      end block create_monitors
+      end block init_monitors
 
    end subroutine simulation_init
 
    !> Perform an NGA2 simulation
    subroutine simulation_run
       implicit none
-      
+
       ! Perform time integration
       do while (.not.time%done())
-         
+
          ! Increment time
          call fs%get_cfl(dt=time%dt,cfl=time%cfl)
          call time%adjust_dt()
          call time%increment()
-         
+
          ! Remember old conserved variables and face velocities
          call fs%Qold%copy(src=fs%Q)
          call fs%Uold%copy(src=fs%U)
          call fs%Vold%copy(src=fs%V)
          call fs%Wold%copy(src=fs%W)
 
-         ! Sub-iterations (same scheme as amrcomp_devol/amrcomp_pd)
+         ! Iterated midpoint scheme: each sub-iteration re-evaluates dQdt at 0.5*(Qold+Q)
          do while (time%it.le.time%itmax)
 
             ! Build midpoint state: Q^{mid}=0.5*(Q+Qold), U^{mid}=0.5*(U+Uold)
@@ -495,7 +514,7 @@ contains
             ! Advance Q using Q^{mid}
             call fs%get_dQdt(dQdt=dQdt)
             call fs%Q%lincomb(a=1.0_WP,src1=fs%Qold,b=time%dt,src2=dQdt)
-            call fs%Q%average_down(); call fs%Q%fill(time%t)
+            call fs%Q%average_down(); call fs%Q%fill(time=time%t)
 
             ! Compute face velocities and ensure C/F consistency
             call fs%get_face_velocity(); call fs%average_down_velocity()
@@ -508,16 +527,6 @@ contains
             call fs%Q%average_down(); call fs%Q%fill(time=time%t)
             call fs%average_down_velocity(); call fs%fill_velocity(time=time%t)
 
-            ! Pressure correction (only if 'Use projection' is enabled; off by default)
-            if (fs%use_projection) then
-               call fs%get_div(); call fs%div%mult(val=1.0_WP/time%dt)
-               call fs%prepare_psolver(dt=time%dt)
-               call fs%psolver%solve(rhs=fs%div)
-               call fs%add_pressure(scale=time%dt)
-               call fs%Q%average_down(); call fs%Q%fill(time=time%t)
-               call fs%average_down_velocity(); call fs%fill_velocity(time=time%t)
-            end if
-
             ! Increment sub-iteration counter
             time%it=time%it+1
 
@@ -525,37 +534,29 @@ contains
 
          ! Recompute primitive variables
          call fs%get_primitive(Q=fs%Q)
-         
+
          ! Regrid if event triggers
          if (regrid_evt%occurs()) then
             call amr%regrid(baselvl=0,time=time%t)
             call gridfile%write()
          end if
 
-         ! Compute viscosities
-         call get_viscosities()
+         ! Update viscosities and derived fields
+         call update_derived()
 
-         ! Add artificial bulk and shear viscosities
-         call fs%add_viscartif(dt=time%dt)
-         call fs%add_vreman(dt=time%dt)
-
-         ! Compute Umag and Mach number
-         call Umag%get_magnitude(srcX=fs%UVW,srcY=fs%UVW,srcZ=fs%UVW,compX=1,compY=2,compZ=3)
-         call Mach%copy(src=Umag); call Mach%divide(src=fs%C)
-         
          ! Visualization output
-         if (viz_evt%occurs()) call viz%write(time%t)
+         if (viz_evt%occurs()) call viz%write(time=time%t)
 
          ! Perform and output monitoring
          call fs%get_info()
          call mfile%write()
          call consfile%write()
          call cflfile%write()
-         
+
       end do
 
    end subroutine simulation_run
-   
+
    !> Finalize the NGA2 simulation
    subroutine simulation_final
       implicit none
@@ -580,5 +581,5 @@ contains
       call consfile%finalize()
       call gridfile%finalize()
    end subroutine simulation_final
-   
+
 end module simulation

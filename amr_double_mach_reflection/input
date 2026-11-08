@@ -8,7 +8,7 @@ Regrid nsteps:     2
 Tagging Criterion: 0.05
 
 # Flow properties
-Mach number: 10.0
+Shock Mach number: 10.0
 Shock angle: 60.0
 
 # Time integration

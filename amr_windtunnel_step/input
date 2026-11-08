@@ -1,7 +1,6 @@
 # AMR grid
 Base nx: 240
 Base ny: 80
-Base nz: 1
 Max levels: 2
 
 # Regridding parameters
@@ -9,7 +8,7 @@ Regrid nsteps:     1
 Tagging Criterion: 0.05
 
 # Flow properties
-Mach:     3.0
+Mach number: 3.0
 
 # Time integration
 Max dt:   1.0e-3
