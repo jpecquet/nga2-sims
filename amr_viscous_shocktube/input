@@ -1,0 +1,24 @@
+# Flow properties
+Length:                 1.0
+Height:                 0.5
+Diaphragm location:     0.5
+Density left:           120.0
+Density right:          1.2
+Specific heat ratio:    1.4
+Prandtl number:         0.73
+Reynolds number:        200.0
+
+# Grid parameters (AMR)
+Base nx:            960
+Base ny:            480
+Max levels:         0
+Regrid nsteps:      1
+Tagging criterion:  0.05
+
+# Time integration
+Max dt:     1.0e-3
+Max CFL:    0.475
+Max time:   1.0
+
+# Output
+Output period:  5.0e-3

@@ -1,0 +1,28 @@
+# Flow properties
+Length:                 890.0
+Height:                 44.5
+Shock location:         667.5
+Shock Mach number:      1.22
+Density pre-shock:      1.0
+Pressure pre-shock:     1.0
+Specific heat ratio:    1.4
+Gas constant:           0.287
+# Bubble properties (helium + 28% air)
+Bubble diameter:            50.0
+Bubble specific heat ratio: 1.648
+Bubble gas constant:        1.578
+
+# Grid parameters (AMR)
+Base nx:            960
+Base ny:            48
+Max levels:         2
+Regrid nsteps:      1
+Tagging criterion:  0.05
+
+# Time integration
+Max dt:     1.0
+Max CFL:    0.475
+Max time:   350.0
+
+# Output
+Output period:  2.5
